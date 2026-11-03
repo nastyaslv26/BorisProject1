@@ -3,12 +3,43 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const Database = require("better-sqlite3");
 
-const menu = [
-  { id: "cinnamon-capibara", name: "Коричная капибара" },
-  { id: "vanilla-croissant", name: "Ванильный круассан" },
-  { id: "chocolate-croissant", name: "Шоколадный круассан" }
+const slots = [
+  { id: "09:00", time: "09:00" },
+  { id: "11:00", time: "11:00" },
+  { id: "13:00", time: "13:00" },
+  { id: "15:00", time: "15:00" },
+  { id: "17:00", time: "17:00" }
 ];
+const databasePath = process.env.DATABASE_PATH || path.join(__dirname, "data", "boris.sqlite");
+fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+const database = new Database(databasePath);
+database.pragma("journal_mode = WAL");
+database.exec(`
+  CREATE TABLE IF NOT EXISTS bookings (
+    date TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (date, slot_id)
+  )
+`);
+const findBookings = database.prepare("SELECT slot_id, full_name FROM bookings WHERE date = ?");
+const insertBooking = database.prepare(
+  "INSERT INTO bookings (date, slot_id, full_name) VALUES (?, ?, ?)"
+);
+
+function getCurrentDate() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.APP_TIME_ZONE || "Europe/Moscow",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const dateParts = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+}
 
 function sendJson(response, statusCode, data) {
   response.writeHead(statusCode, {
@@ -55,41 +86,54 @@ async function handleRequest(request, response) {
     return;
   }
 
-  if (request.method === "GET" && pathname === "/api/menu") {
-    sendJson(response, 200, { items: menu });
+  if (request.method === "GET" && pathname === "/api/state") {
+    const date = getCurrentDate();
+    const bookings = new Map(findBookings.all(date).map((booking) => [booking.slot_id, booking.full_name]));
+    sendJson(response, 200, {
+      date,
+      slots: slots.map((slot) => ({ ...slot, fullName: bookings.get(slot.id) || null })),
+      lastFeeding: null
+    });
     return;
   }
 
-  if (request.method === "POST" && pathname === "/api/selection") {
-    let selection;
+  if (request.method === "POST" && pathname === "/api/bookings") {
+    let booking;
     try {
-      selection = await readJsonBody(request);
+      booking = await readJsonBody(request);
     } catch (error) {
       sendJson(response, error.statusCode || 400, { ok: false, error: error.message });
       return;
     }
 
-    if (!selection || typeof selection !== "object" || Array.isArray(selection) || typeof selection.id !== "string") {
-      sendJson(response, 400, { ok: false, error: "Укажите идентификатор позиции в поле id." });
+    if (!booking || typeof booking !== "object" || Array.isArray(booking)) {
+      sendJson(response, 400, { ok: false, error: "Передайте слот и ФИО." });
       return;
     }
 
-    const item = menu.find((entry) => entry.id === selection.id);
-    if (!item) {
-      sendJson(response, 400, { ok: false, error: "Неизвестный идентификатор позиции." });
+    const slot = slots.find((entry) => entry.id === booking.slotId);
+    if (!slot) {
+      sendJson(response, 400, { ok: false, error: "Выберите время из расписания." });
       return;
     }
 
-    sendJson(response, 200, {
-      ok: true,
-      message: "Выбор подтверждён локально; он не сохранён.",
-      item
-    });
-    return;
-  }
+    const fullName = typeof booking.fullName === "string" ? booking.fullName.trim() : "";
+    if (!fullName || fullName.length > 100) {
+      sendJson(response, 400, { ok: false, error: "Укажите ФИО длиной не более 100 символов." });
+      return;
+    }
 
-  if (request.method === "POST" && pathname === "/api/reset") {
-    sendJson(response, 200, { ok: true, message: "Выбор сброшен." });
+    try {
+      insertBooking.run(getCurrentDate(), slot.id, fullName);
+    } catch (error) {
+      if (error.code && error.code.startsWith("SQLITE_CONSTRAINT")) {
+        sendJson(response, 409, { ok: false, error: "Это время уже занято." });
+        return;
+      }
+      throw error;
+    }
+
+    sendJson(response, 201, { ok: true, slot: { ...slot, fullName } });
     return;
   }
 

@@ -425,6 +425,10 @@
     }
 
     function renderFeeding(feeding) {
+      if (feeding === null) {
+        feedingElement.textContent = "Данные пока не указаны";
+        return;
+      }
       if (!feeding || typeof feeding.time !== "string" || typeof feeding.fullName !== "string") {
         throw new Error("Не удалось загрузить данные о последнем кормлении.");
       }
@@ -437,6 +441,12 @@
     }
 
     function renderSlots(slots) {
+      const drafts = new Map(
+        Array.from(slotsElement.querySelectorAll(".slot-input"), (input) => [
+          input.closest("form").dataset.slotId,
+          input.value
+        ])
+      );
       if (!Array.isArray(slots) || slots.length !== 5) {
         throw new Error("Расписание должно содержать ровно пять слотов.");
       }
@@ -469,6 +479,7 @@
         if (!booked) {
           const form = document.createElement("form");
           form.className = "slot-form";
+          form.dataset.slotId = slot.id;
           const input = document.createElement("input");
           input.className = "slot-input";
           input.type = "text";
@@ -478,6 +489,7 @@
           input.required = true;
           input.placeholder = "Ваше ФИО";
           input.setAttribute("aria-label", `ФИО для слота ${slot.time}`);
+          input.value = drafts.get(slot.id) || "";
 
           const button = document.createElement("button");
           button.className = "book-button";
@@ -494,31 +506,44 @@
 
     async function readResponse(response) {
       if (!response.ok) {
-        const error = new Error("Не удалось связаться с расписанием.");
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+        const error = new Error(data?.error || "Не удалось связаться с расписанием.");
         error.status = response.status;
         throw error;
       }
       return response.json();
     }
 
-    async function loadSchedule() {
-      slotsElement.setAttribute("aria-busy", "true");
+    async function loadSchedule({ quiet = false } = {}) {
+      if (!quiet) {
+        slotsElement.setAttribute("aria-busy", "true");
+      }
       try {
         const response = await fetch("/api/state", {
-          headers: { Accept: "application/json" }
+          headers: { Accept: "application/json" },
+          cache: "no-store"
         });
         const state = await readResponse(response);
         dateElement.textContent = formatDate(state.date);
         renderSlots(state.slots);
         renderFeeding(state.lastFeeding);
-        setNotice("Расписание обновлено.");
+        if (!quiet) {
+          setNotice("Расписание обновлено.");
+        }
       } catch (error) {
         setNotice(error.message || "Не удалось загрузить расписание.", "error");
         if (feedingElement.textContent === "Загружаем информацию…") {
           feedingElement.textContent = "Нет соединения с сервером";
         }
       } finally {
-        slotsElement.setAttribute("aria-busy", "false");
+        if (!quiet) {
+          slotsElement.setAttribute("aria-busy", "false");
+        }
       }
     }
 
@@ -544,12 +569,12 @@
 
         if (response.status === 409) {
           setNotice("Этот слот уже заняли. Обновляем расписание.", "error");
-          await loadSchedule();
+          await loadSchedule({ quiet: true });
           return;
         }
         await readResponse(response);
         setNotice("Готово! Вы записаны на прогулку.", "success");
-        await loadSchedule();
+        await loadSchedule({ quiet: true });
       } catch (error) {
         button.disabled = false;
         setNotice(error.message || "Не удалось сохранить запись. Попробуйте ещё раз.", "error");
@@ -557,6 +582,16 @@
     }
 
     loadSchedule();
+    window.setInterval(() => {
+      if (!document.hidden) {
+        loadSchedule({ quiet: true });
+      }
+    }, 4000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        loadSchedule({ quiet: true });
+      }
+    });
   </script>
 </body>
 </html>
