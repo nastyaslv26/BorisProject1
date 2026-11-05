@@ -4,6 +4,18 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const Database = require("better-sqlite3");
+const MAX_BODY_BYTES = 8 * 1024;
+const moscowDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Moscow",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+  timeZoneName: "longOffset"
+});
 
 const slots = [
   { id: "09:00", time: "09:00" },
@@ -26,22 +38,34 @@ database.exec(`
     full_name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (date, slot_id)
-  )
+  );
+  CREATE TABLE IF NOT EXISTS feedings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `);
 const findBookings = database.prepare("SELECT slot_id, full_name FROM bookings WHERE date = ?");
 const insertBooking = database.prepare(
-  "INSERT INTO bookings (date, slot_id, full_name) VALUES (?, ?, ?)"
+  "INSERT INTO bookings (date, slot_id, full_name, created_at) VALUES (?, ?, ?, ?)"
+);
+const findLatestFeeding = database.prepare(
+  "SELECT full_name, created_at FROM feedings ORDER BY id DESC LIMIT 1"
+);
+const insertFeeding = database.prepare(
+  "INSERT INTO feedings (full_name, created_at) VALUES (?, ?)"
 );
 
-function getCurrentDate() {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: process.env.APP_TIME_ZONE || "Europe/Moscow",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(new Date());
-  const dateParts = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
-  return `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+function getMoscowDateTime() {
+  const parts = Object.fromEntries(
+    moscowDateTimeFormatter.formatToParts(new Date()).map(({ type, value }) => [type, value])
+  );
+  const date = `${parts.year}-${parts.month}-${parts.day}`;
+  const offset = parts.timeZoneName.slice(3);
+  return {
+    date,
+    timestamp: `${date}T${parts.hour}:${parts.minute}:${parts.second}${offset}`
+  };
 }
 
 function sendJson(response, statusCode, data) {
@@ -57,16 +81,65 @@ function sendText(response, statusCode, text, contentType = "text/plain; charset
   response.end(text);
 }
 
+function hasJsonContentType(request) {
+  return request.headers["content-type"]
+    ?.split(";", 1)[0]
+    .trim()
+    .toLowerCase() === "application/json";
+}
+
+function getValidFullName(value) {
+  if (typeof value !== "string") return null;
+  const fullName = value.trim();
+  return fullName && fullName.length <= 100 && !/[\u0000-\u001f\u007f]/.test(fullName)
+    ? fullName
+    : null;
+}
+
+function rejectUnsupportedContentType(request, response) {
+  request.pause();
+  response.writeHead(415, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Connection": "close"
+  });
+  response.end(JSON.stringify({
+    ok: false,
+    error: "Поддерживается только JSON (Content-Type: application/json)."
+  }));
+}
+
 function readJsonBody(request) {
   return new Promise((resolve, reject) => {
-    let body = "";
-    request.setEncoding("utf8");
+    let totalBytes = 0;
+    let rejected = false;
+    const chunks = [];
+    const rejectLargeBody = () => {
+      rejected = true;
+      chunks.length = 0;
+      request.pause();
+      reject(Object.assign(new Error("Тело запроса слишком большое."), { statusCode: 413 }));
+    };
+
+    const contentLength = request.headers["content-length"];
+    if (contentLength !== undefined && Number(contentLength) > MAX_BODY_BYTES) {
+      rejectLargeBody();
+      return;
+    }
+
     request.on("data", (chunk) => {
-      body += chunk;
+      if (rejected) return;
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_BODY_BYTES) {
+        rejectLargeBody();
+        return;
+      }
+      chunks.push(chunk);
     });
     request.on("end", () => {
+      if (rejected) return;
       try {
-        resolve(JSON.parse(body));
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       } catch {
         reject(Object.assign(new Error("Некорректный JSON."), { statusCode: 400 }));
       }
@@ -106,17 +179,30 @@ async function handleRequest(request, response) {
   }
 
   if (request.method === "GET" && pathname === "/api/state") {
-    const date = getCurrentDate();
-    const bookings = new Map(findBookings.all(date).map((booking) => [booking.slot_id, booking.full_name]));
-    sendJson(response, 200, {
-      date,
-      slots: slots.map((slot) => ({ ...slot, fullName: bookings.get(slot.id) || null })),
-      lastFeeding: null
-    });
+    try {
+      const { date } = getMoscowDateTime();
+      const bookings = new Map(findBookings.all(date).map((booking) => [booking.slot_id, booking.full_name]));
+      const latestFeeding = findLatestFeeding.get();
+      sendJson(response, 200, {
+        date,
+        slots: slots.map((slot) => ({ ...slot, fullName: bookings.get(slot.id) || null })),
+        lastFeeding: latestFeeding
+          ? { fullName: latestFeeding.full_name, time: latestFeeding.created_at }
+          : null
+      });
+    } catch (error) {
+      console.error("Could not load schedule:", error.message);
+      sendJson(response, 500, { ok: false, error: "Не удалось загрузить расписание." });
+    }
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/bookings") {
+    if (!hasJsonContentType(request)) {
+      rejectUnsupportedContentType(request, response);
+      return;
+    }
+
     let booking;
     try {
       booking = await readJsonBody(request);
@@ -136,14 +222,15 @@ async function handleRequest(request, response) {
       return;
     }
 
-    const fullName = typeof booking.fullName === "string" ? booking.fullName.trim() : "";
-    if (!fullName || fullName.length > 100) {
+    const fullName = getValidFullName(booking.fullName);
+    if (!fullName) {
       sendJson(response, 400, { ok: false, error: "Укажите ФИО длиной не более 100 символов." });
       return;
     }
 
     try {
-      insertBooking.run(getCurrentDate(), slot.id, fullName);
+      const { date, timestamp } = getMoscowDateTime();
+      insertBooking.run(date, slot.id, fullName, timestamp);
     } catch (error) {
       if (error.code && error.code.startsWith("SQLITE_CONSTRAINT")) {
         sendJson(response, 409, { ok: false, error: "Это время уже занято." });
@@ -156,8 +243,47 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "POST" && pathname === "/api/feedings") {
+    if (!hasJsonContentType(request)) {
+      rejectUnsupportedContentType(request, response);
+      return;
+    }
+
+    let feeding;
+    try {
+      feeding = await readJsonBody(request);
+    } catch (error) {
+      sendJson(response, error.statusCode || 400, { ok: false, error: error.message });
+      return;
+    }
+
+    if (!feeding || typeof feeding !== "object" || Array.isArray(feeding)) {
+      sendJson(response, 400, { ok: false, error: "Передайте ФИО сотрудника." });
+      return;
+    }
+
+    const fullName = getValidFullName(feeding.fullName);
+    if (!fullName) {
+      sendJson(response, 400, {
+        ok: false,
+        error: "Укажите корректное ФИО длиной не более 100 символов."
+      });
+      return;
+    }
+
+    try {
+      const { timestamp } = getMoscowDateTime();
+      insertFeeding.run(fullName, timestamp);
+      sendJson(response, 201, { ok: true, message: "Кормление отмечено." });
+    } catch (error) {
+      console.error("Could not save feeding:", error.message);
+      sendJson(response, 500, { ok: false, error: "Не удалось сохранить отметку о кормлении." });
+    }
+    return;
+  }
+
   if (request.method === "GET" && pathname === "/api/status") {
-    sendJson(response, 200, { ok: true, time: new Date().toISOString() });
+    sendJson(response, 200, { ok: true, time: getMoscowDateTime().timestamp });
     return;
   }
 

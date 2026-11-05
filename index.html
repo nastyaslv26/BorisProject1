@@ -297,12 +297,56 @@
       text-align: right;
     }
 
-    .feeding-meta strong {
+    .feeding-meta strong, .feeding-meta time {
       display: block;
       margin-bottom: 3px;
       color: var(--ink);
       font-size: 15px;
     }
+
+    .feeding-form {
+      display: flex;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .feeding-input {
+      width: min(220px, 30vw);
+      min-width: 130px;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #fff;
+      font-size: 13px;
+    }
+
+    .feeding-button {
+      padding: 9px 12px;
+      border: 0;
+      border-radius: 9px;
+      color: #fff;
+      background: var(--green);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .feeding-button:disabled {
+      opacity: .6;
+      cursor: wait;
+    }
+
+    .feeding-notice {
+      flex-basis: 100%;
+      min-height: 18px;
+      margin: -10px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }
+
+    .feeding-notice[data-kind="error"] { color: var(--red-dark); }
+    .feeding-notice[data-kind="success"] { color: var(--green); }
 
     .notice {
       min-height: 22px;
@@ -351,6 +395,9 @@
       .feeding { align-items: start; padding: 15px; }
       .feeding-label { gap: 9px; font-size: 14px; }
       .feeding-meta { font-size: 12px; }
+      .feeding-form { width: 100%; }
+      .feeding-input { width: 100%; min-width: 0; }
+      .feeding-notice { text-align: left; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -393,6 +440,20 @@
         <span>Последнее кормление</span>
       </div>
       <div id="feeding-info" class="feeding-meta">Загружаем информацию…</div>
+      <form id="feeding-form" class="feeding-form">
+        <input
+          id="feeding-name"
+          class="feeding-input"
+          type="text"
+          name="fullName"
+          autocomplete="name"
+          maxlength="100"
+          required
+          placeholder="Ваше ФИО"
+          aria-label="ФИО сотрудника, который покормил Бориса">
+        <button id="feeding-button" class="feeding-button" type="submit">Отметить</button>
+      </form>
+      <p id="feeding-notice" class="feeding-notice" role="status" aria-live="polite"></p>
     </aside>
   </main>
 
@@ -406,6 +467,10 @@
     const dateElement = document.querySelector("#today");
     const noticeElement = document.querySelector("#notice");
     const feedingElement = document.querySelector("#feeding-info");
+    const feedingForm = document.querySelector("#feeding-form");
+    const feedingInput = document.querySelector("#feeding-name");
+    const feedingButton = document.querySelector("#feeding-button");
+    const feedingNotice = document.querySelector("#feeding-notice");
 
     function setNotice(message, kind = "") {
       noticeElement.textContent = message;
@@ -433,8 +498,19 @@
         throw new Error("Не удалось загрузить данные о последнем кормлении.");
       }
       feedingElement.replaceChildren();
-      const time = document.createElement("strong");
-      time.textContent = feeding.time;
+      const timestamp = new Date(feeding.time);
+      if (Number.isNaN(timestamp.getTime())) {
+        throw new Error("Сервер вернул некорректное время кормления.");
+      }
+      const time = document.createElement("time");
+      time.dateTime = feeding.time;
+      time.textContent = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Europe/Moscow",
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit"
+      }).format(timestamp);
       const person = document.createElement("span");
       person.textContent = feeding.fullName;
       feedingElement.append(time, person);
@@ -540,11 +616,13 @@
         if (feedingElement.textContent === "Загружаем информацию…") {
           feedingElement.textContent = "Нет соединения с сервером";
         }
+        return false;
       } finally {
         if (!quiet) {
           slotsElement.setAttribute("aria-busy", "false");
         }
       }
+      return true;
     }
 
     async function bookSlot(event, slotId, input, button) {
@@ -580,6 +658,45 @@
         setNotice(error.message || "Не удалось сохранить запись. Попробуйте ещё раз.", "error");
       }
     }
+
+    async function markFeeding(event) {
+      event.preventDefault();
+      const fullName = feedingInput.value.trim();
+      if (!fullName) {
+        feedingInput.focus();
+        feedingNotice.textContent = "Укажите ФИО.";
+        feedingNotice.dataset.kind = "error";
+        return;
+      }
+
+      feedingButton.disabled = true;
+      feedingNotice.textContent = "Сохраняем отметку…";
+      feedingNotice.dataset.kind = "";
+      try {
+        const response = await fetch("/api/feedings", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json"
+          },
+          body: JSON.stringify({ fullName })
+        });
+        await readResponse(response);
+        feedingInput.value = "";
+        const refreshed = await loadSchedule({ quiet: true });
+        feedingNotice.textContent = refreshed
+          ? "Отметка сохранена."
+          : "Отметка сохранена, но карточку не удалось обновить.";
+        feedingNotice.dataset.kind = refreshed ? "success" : "error";
+      } catch (error) {
+        feedingNotice.textContent = error.message || "Не удалось сохранить отметку.";
+        feedingNotice.dataset.kind = "error";
+      } finally {
+        feedingButton.disabled = false;
+      }
+    }
+
+    feedingForm.addEventListener("submit", markFeeding);
 
     loadSchedule();
     window.setInterval(() => {
