@@ -12,7 +12,10 @@ const slots = [
   { id: "15:00", time: "15:00" },
   { id: "17:00", time: "17:00" }
 ];
-const databasePath = process.env.DATABASE_PATH || path.join(__dirname, "data", "boris.sqlite");
+const defaultDatabasePath = process.env.AMVERA === "1"
+  ? path.join("/data", "boris.sqlite")
+  : path.join(__dirname, "data", "boris.sqlite");
+const databasePath = process.env.DATABASE_PATH || defaultDatabasePath;
 fs.mkdirSync(path.dirname(databasePath), { recursive: true });
 const database = new Database(databasePath);
 database.pragma("journal_mode = WAL");
