@@ -89,6 +89,22 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (request.method === "GET" && pathname === "/assets/corgi.png") {
+    fs.readFile(path.join(__dirname, "assets", "corgi.png"), (error, image) => {
+      if (error) {
+        console.error("Could not read corgi image:", error.message);
+        sendJson(response, 500, { ok: false, error: "Не удалось загрузить изображение." });
+        return;
+      }
+      response.writeHead(200, {
+        "Content-Type": "image/png",
+        "Cache-Control": "public, max-age=3600"
+      });
+      response.end(image);
+    });
+    return;
+  }
+
   if (request.method === "GET" && pathname === "/api/state") {
     const date = getCurrentDate();
     const bookings = new Map(findBookings.all(date).map((booking) => [booking.slot_id, booking.full_name]));
