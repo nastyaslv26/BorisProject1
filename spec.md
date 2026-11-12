@@ -44,23 +44,23 @@
 
 ```sql
 CREATE TABLE IF NOT EXISTS walk_slots (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	walk_date TEXT NOT NULL,
-	slot_time TEXT NOT NULL,
-	booked_by TEXT,
-	booked_at TEXT,
-	UNIQUE (walk_date, slot_time),
-	CHECK (
-		(booked_by IS NULL AND booked_at IS NULL)
-		OR
-		(booked_by IS NOT NULL AND booked_at IS NOT NULL)
-	)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  walk_date TEXT NOT NULL,
+  slot_time TEXT NOT NULL,
+  booked_by TEXT,
+  booked_at TEXT,
+  UNIQUE (walk_date, slot_time),
+  CHECK (
+    (booked_by IS NULL AND booked_at IS NULL)
+    OR
+    (booked_by IS NOT NULL AND booked_at IS NOT NULL)
+  )
 );
 
 CREATE TABLE IF NOT EXISTS feedings (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	full_name TEXT NOT NULL,
-	created_at TEXT NOT NULL
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_name TEXT NOT NULL,
+  fed_at TEXT NOT NULL
 );
 ```
 
@@ -69,14 +69,6 @@ CREATE TABLE IF NOT EXISTS feedings (
 При записи сервер должен изменить только свободный слот. Если запись уже появилась до выполнения запроса, сервер возвращает конфликт и сохраняет первоначальное ФИО. Подходящая реализация использует одну атомарную операцию обновления или транзакцию; нельзя сначала отдельно прочитать «свободен ли слот», а потом без защиты записать новое имя.
 
 ФИО для прогулки и кормления должно быть непустым после удаления лишних пробелов. Используйте только синтетические значения, например «Анна Тестова» и «Илья Примеров».
-
-Дата слотов, время записи и время кормления используют часовой пояс `Europe/Moscow`; отметки времени сохраняются в ISO 8601 с явным смещением.
-
-## API кормления
-
-* `POST /api/feedings` принимает JSON `{"fullName":"ФИО"}`. Сервер удаляет пробелы по краям, отклоняет пустое или превышающее 100 символов имя с HTTP 400, а отметку сохраняет в SQLite и отвечает HTTP 201.
-* Тело запроса ограничено 8 КиБ. Принимается только `Content-Type: application/json`.
-* `GET /api/state` возвращает `lastFeeding: null`, если отметок нет, иначе объект с ФИО и временем последней отметки. Новая отметка обновляет карточку.
 
 ## Технический контур
 
